@@ -3,7 +3,6 @@ import json
 import uuid
 import subprocess
 import asyncio
-from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -30,7 +29,12 @@ LOGS_DIR = "logs"
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-STATE = {}
+# ================= STATE =================
+STATE = {
+    "step": None,
+    "job_data": None,   # dict while creating/editing
+    "job_id": None      # string for existing job
+}
 
 # ================= HELPERS =================
 def kb(rows):
@@ -52,13 +56,12 @@ def progress_text(job):
     pct = int((done / total) * 100) if total else 0
     return f"{done}/{total} ({pct}%)"
 
-# ================= TOTAL COUNT LOGIC =================
+# ================= TOTAL COUNT =================
 async def calculate_total_messages(job):
     client = TelegramClient("count_session", API_ID, API_HASH)
     await client.start()
 
     total = 0
-
     for src in job["sources"]:
         async for msg in client.iter_messages(src):
             if isinstance(msg, MessageService):
@@ -72,7 +75,6 @@ async def calculate_total_messages(job):
                 if job["date_mode"] == "range":
                     if not (parse(job["from"]).date() <= mdate <= parse(job["to"]).date()):
                         continue
-
             total += 1
 
     await client.disconnect()
@@ -90,11 +92,13 @@ async def home(msg):
         ])
     )
 
-# ================= COMMAND =================
+# ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    STATE.clear()
+    STATE["step"] = None
+    STATE["job_data"] = None
+    STATE["job_id"] = None
     await home(update.message)
 
 # ================= CALLBACKS =================
@@ -107,16 +111,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     d = q.data
 
-    # -------- HOME --------
+    # HOME
     if d == "home":
-        STATE.clear()
+        STATE["step"] = None
+        STATE["job_data"] = None
+        STATE["job_id"] = None
         await home(q.message)
 
-    # -------- CREATE JOB --------
+    # CREATE JOB
     elif d == "create":
-        STATE.clear()
         STATE["step"] = "title"
-        STATE["job"] = {
+        STATE["job_data"] = {
             "job_id": f"job_{uuid.uuid4().hex[:6]}",
             "title": "",
             "sources": [],
@@ -133,27 +138,19 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         await q.message.reply_text("📝 Send Job Title")
 
-    # -------- LIST JOBS --------
+    # LIST JOBS
     elif d == "list":
-        files = os.listdir(JOBS_DIR)
-        if not files:
-            await q.message.reply_text("No jobs found", reply_markup=kb([
-                [InlineKeyboardButton("⬅ Back", callback_data="home")]
-            ]))
-            return
-
         rows = []
-        for f in files:
+        for f in os.listdir(JOBS_DIR):
             jid = f.replace(".json", "")
             rows.append([InlineKeyboardButton(jid, callback_data=f"open_{jid}")])
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="home")])
-
         await q.message.reply_text("📋 Jobs", reply_markup=kb(rows))
 
-    # -------- OPEN JOB --------
+    # OPEN JOB
     elif d.startswith("open_"):
         jid = d.replace("open_", "")
-        STATE["job"] = jid
+        STATE["job_id"] = jid
         job = load_job(jid)
 
         await q.message.reply_text(
@@ -164,88 +161,33 @@ Progress: `{progress_text(job)}`
 Sources: `{len(job['sources'])}`
 Destinations: `{len(job['destinations'])}`
 Batch: `{job['batch']}`
-Date mode: `{job['date_mode']}`
 """,
             parse_mode="Markdown",
             reply_markup=kb([
                 [InlineKeyboardButton("➕ Add Source", callback_data="add_source")],
-                [InlineKeyboardButton("📥 Set Destination", callback_data="add_dest")],
-                [InlineKeyboardButton("📅 Date Filter", callback_data="date_menu")],
-                [InlineKeyboardButton("🔢 Batch Size", callback_data="batch_menu")],
+                [InlineKeyboardButton("📥 Add Destination", callback_data="add_dest")],
                 [InlineKeyboardButton("▶ Start Job", callback_data="start_job")],
-                [InlineKeyboardButton("⏸ Pause/Resume", callback_data="toggle")],
+                [InlineKeyboardButton("⏸ Pause / Resume", callback_data="toggle")],
                 [InlineKeyboardButton("📊 Progress", callback_data="progress")],
                 [InlineKeyboardButton("🧾 Logs", callback_data="logs")],
-                [InlineKeyboardButton("❌ Cancel Job", callback_data="cancel")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
                 [InlineKeyboardButton("⬅ Back", callback_data="list")]
             ])
         )
 
-    # -------- ADD SOURCE --------
+    # ADD SOURCE
     elif d == "add_source":
         STATE["step"] = "add_source"
-        await q.message.reply_text("Send source channel (username / link). Send `done` to finish")
+        await q.message.reply_text("Send source channel. Send `done` to finish")
 
-    # -------- ADD DEST --------
+    # ADD DESTINATION
     elif d == "add_dest":
         STATE["step"] = "add_dest"
-        await q.message.reply_text("Send destination channel (username / link). Send `done` to finish")
+        await q.message.reply_text("Send destination channel. Send `done` to finish")
 
-    # -------- DATE MENU --------
-    elif d == "date_menu":
-        await q.message.reply_text(
-            "Select date mode",
-            reply_markup=kb([
-                [InlineKeyboardButton("All Messages", callback_data="date_all")],
-                [InlineKeyboardButton("Single Date", callback_data="date_single")],
-                [InlineKeyboardButton("Date Range", callback_data="date_range")],
-                [InlineKeyboardButton("⬅ Back", callback_data=f"open_{STATE['job']}")]
-            ])
-        )
-
-    elif d == "date_all":
-        job = load_job(STATE["job"])
-        job["date_mode"] = "all"
-        job["from"] = None
-        job["to"] = None
-        save_job(job)
-        await q.message.reply_text("Date mode set to ALL")
-
-    elif d == "date_single":
-        STATE["step"] = "date_single"
-        await q.message.reply_text("Send date YYYY-MM-DD")
-
-    elif d == "date_range":
-        STATE["step"] = "date_from"
-        await q.message.reply_text("Send FROM date YYYY-MM-DD")
-
-    # -------- BATCH MENU --------
-    elif d == "batch_menu":
-        await q.message.reply_text(
-            "Select batch size",
-            reply_markup=kb([
-                [InlineKeyboardButton("10", callback_data="batch_10"),
-                 InlineKeyboardButton("20", callback_data="batch_20"),
-                 InlineKeyboardButton("30", callback_data="batch_30")],
-                [InlineKeyboardButton("Custom", callback_data="batch_custom")],
-                [InlineKeyboardButton("⬅ Back", callback_data=f"open_{STATE['job']}")]
-            ])
-        )
-
-    elif d.startswith("batch_"):
-        job = load_job(STATE["job"])
-        val = d.split("_")[1]
-        if val == "custom":
-            STATE["step"] = "batch_custom"
-            await q.message.reply_text("Send custom batch number")
-        else:
-            job["batch"] = int(val)
-            save_job(job)
-            await q.message.reply_text(f"Batch size set to {val}")
-
-    # -------- START JOB (REAL LOGIC) --------
+    # START JOB (REAL)
     elif d == "start_job":
-        jid = STATE["job"]
+        jid = STATE["job_id"]
         job = load_job(jid)
 
         if not job["sources"]:
@@ -255,12 +197,11 @@ Date mode: `{job['date_mode']}`
             await q.message.reply_text("❌ No destinations added")
             return
 
-        await q.message.reply_text("⏳ Calculating total messages, please wait...")
-
+        await q.message.reply_text("⏳ Calculating total messages...")
         total = await calculate_total_messages(job)
 
         if total == 0:
-            await q.message.reply_text("❌ No messages found with selected filters")
+            await q.message.reply_text("❌ No messages found")
             return
 
         job["progress"]["done"] = 0
@@ -271,65 +212,60 @@ Date mode: `{job['date_mode']}`
         save_job(job)
 
         subprocess.Popen(["python3", "job_runner.py"])
+        await q.message.reply_text(f"▶ Job started\nTotal: {total}")
 
-        await q.message.reply_text(f"▶ Job started\nTotal messages: {total}")
-
-    # -------- TOGGLE PAUSE --------
+    # PAUSE / RESUME
     elif d == "toggle":
-        job = load_job(STATE["job"])
+        job = load_job(STATE["job_id"])
         job["paused"] = not job["paused"]
         job["status"] = "paused" if job["paused"] else "running"
         save_job(job)
         await q.message.reply_text("⏯ Status updated")
 
-    # -------- PROGRESS --------
+    # PROGRESS
     elif d == "progress":
-        job = load_job(STATE["job"])
-        await q.message.reply_text(
-            f"📊 Progress\n{progress_text(job)}"
-        )
+        job = load_job(STATE["job_id"])
+        await q.message.reply_text(f"📊 {progress_text(job)}")
 
-    # -------- LOGS --------
+    # LOGS
     elif d == "logs":
-        jid = STATE["job"]
+        jid = STATE["job_id"]
         path = f"{LOGS_DIR}/{jid}.log"
-        if not os.path.exists(path):
-            txt = "No logs yet"
-        else:
-            txt = "".join(open(path).readlines()[-20:])
+        txt = open(path).read()[-1500:] if os.path.exists(path) else "No logs yet"
         await q.message.reply_text(f"🧾 Logs\n\n{txt}")
 
-    # -------- CANCEL --------
+    # CANCEL
     elif d == "cancel":
-        job = load_job(STATE["job"])
+        job = load_job(STATE["job_id"])
         job["cancelled"] = True
         job["status"] = "cancelled"
         save_job(job)
         await q.message.reply_text("❌ Job cancelled")
 
-    # -------- RUN RUNNER --------
+    # RUN RUNNER
     elif d == "run":
         subprocess.Popen(["python3", "job_runner.py"])
-        await q.message.reply_text("Job runner started")
+        await q.message.reply_text("Runner started")
 
-# ================= TEXT INPUT =================
+# ================= TEXT HANDLER =================
 async def text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    step = STATE.get("step")
-    job = STATE.get("job")
+    step = STATE["step"]
+    job = STATE["job_data"]
 
     if step == "title":
         job["title"] = update.message.text
         STATE["step"] = "add_source"
-        await update.message.reply_text("Send source channel (send `done` to finish)")
+        await update.message.reply_text("Send source channel (`done` to finish)")
 
     elif step == "add_source":
         if update.message.text.lower() == "done":
             STATE["step"] = None
             save_job(job)
-            await update.message.reply_text("Sources saved")
+            STATE["job_data"] = None
+            await update.message.reply_text("✅ Sources saved")
         else:
             job["sources"].append(update.message.text)
 
@@ -337,45 +273,14 @@ async def text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.text.lower() == "done":
             STATE["step"] = None
             save_job(job)
-            await update.message.reply_text("Destinations saved")
+            STATE["job_data"] = None
+            await update.message.reply_text("✅ Destinations saved")
         else:
             job["destinations"].append(update.message.text)
 
-    elif step == "date_single":
-        job = load_job(STATE["job"])
-        job["date_mode"] = "single"
-        job["from"] = update.message.text
-        save_job(job)
-        STATE["step"] = None
-        await update.message.reply_text("Single date set")
-
-    elif step == "date_from":
-        job = load_job(STATE["job"])
-        job["from"] = update.message.text
-        STATE["step"] = "date_to"
-        save_job(job)
-        await update.message.reply_text("Send TO date YYYY-MM-DD")
-
-    elif step == "date_to":
-        job = load_job(STATE["job"])
-        job["to"] = update.message.text
-        job["date_mode"] = "range"
-        save_job(job)
-        STATE["step"] = None
-        await update.message.reply_text("Date range set")
-
-    elif step == "batch_custom":
-        job = load_job(STATE["job"])
-        job["batch"] = int(update.message.text)
-        save_job(job)
-        STATE["step"] = None
-        await update.message.reply_text("Custom batch set")
-
 # ================= APP =================
 app = ApplicationBuilder().token(CFG["admin_bot_token"]).build()
-
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(buttons))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
-
 app.run_polling()
