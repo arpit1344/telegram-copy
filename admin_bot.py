@@ -372,7 +372,7 @@ async def text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Custom batch set")
 
 # ================= APP =================
-app = ApplicationBuilder().token(CFG["admin_bot_token"]).build()
+app = ApplicationBuilder().token("8536928293:AAHGow7xQLDQ31YesZPghK_cTxIFeRPULAg").build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(buttons))
