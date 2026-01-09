@@ -12,18 +12,27 @@ JOBS_DIR = "jobs"
 LOGS_DIR = "logs"
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-def job_path(jid):
+def jp(jid):
     return f"{JOBS_DIR}/{jid}.json"
 
 def load_job(jid):
-    return json.load(open(job_path(jid)))
+    return json.load(open(jp(jid)))
 
 def save_job(job):
-    json.dump(job, open(job_path(job["job_id"]), "w"), indent=2)
+    json.dump(job, open(jp(job["job_id"]), "w"), indent=2)
 
 def log(jid, msg):
     with open(f"{LOGS_DIR}/{jid}.log", "a") as f:
         f.write(f"[{datetime.now()}] {msg}\n")
+
+async def wait_if_paused(jid):
+    while True:
+        job = load_job(jid)
+        if job.get("cancelled"):
+            raise Exception("CANCELLED")
+        if not job.get("paused"):
+            return
+        await asyncio.sleep(1)
 
 async def run_job(jid):
     client = TelegramClient("worker_session", API_ID, API_HASH)
@@ -31,49 +40,28 @@ async def run_job(jid):
 
     log(jid, "Worker started")
 
-    while True:
-        # 🔁 ALWAYS reload latest job state
-        try:
-            job = load_job(jid)
-        except Exception:
-            log(jid, "Job file missing, stopping worker")
-            break
+    try:
+        job = load_job(jid)
+        job["status"] = "running"
+        save_job(job)
 
-        # ❌ CANCEL IMMEDIATELY
-        if job.get("cancelled"):
-            log(jid, "Job cancelled by admin")
-            break
-
-        # ⏸ PAUSE LOOP
-        if job.get("paused"):
-            await asyncio.sleep(2)
-            continue
-
-        sources = job["sources"]
-        destinations = job["destinations"]
-
-        # loop through sources
-        for src in sources:
-            try:
-                src_entity = await client.get_entity(
-                    int(src) if str(src).startswith("-100") else src
-                )
-            except Exception as e:
-                log(jid, f"Source access error {src}: {e}")
-                continue
+        for src in job["sources"]:
+            src_entity = await client.get_entity(
+                int(src) if str(src).startswith("-100") else src
+            )
 
             async for msg in client.iter_messages(src_entity):
-                # 🔁 RELOAD job INSIDE MESSAGE LOOP
                 job = load_job(jid)
 
+                # ❌ CANCEL IMMEDIATELY
                 if job.get("cancelled"):
-                    log(jid, "Job cancelled during copy")
-                    await client.disconnect()
+                    log(jid, "Job cancelled")
+                    job["status"] = "cancelled"
+                    save_job(job)
                     return
 
-                while job.get("paused"):
-                    await asyncio.sleep(2)
-                    job = load_job(jid)
+                # ⏸ STRICT PAUSE
+                await wait_if_paused(jid)
 
                 if isinstance(msg, MessageService):
                     continue
@@ -87,39 +75,58 @@ async def run_job(jid):
                         if not (parse(job["from"]).date() <= m <= parse(job["to"]).date()):
                             continue
 
-                for dest in destinations:
-                    try:
-                        dest_entity = await client.get_entity(
-                            int(dest) if str(dest).startswith("-100") else dest
-                        )
-                        await client.send_message(dest_entity, msg)
-                    except Exception as e:
-                        log(jid, f"Send failed: {e}")
+                # SEND TO DESTINATIONS
+                for dest in job["destinations"]:
+                    await wait_if_paused(jid)
 
-                # ✅ UPDATE PROGRESS SAFELY
+                    job = load_job(jid)
+                    if job.get("cancelled"):
+                        raise Exception("CANCELLED")
+
+                    dest_entity = await client.get_entity(
+                        int(dest) if str(dest).startswith("-100") else dest
+                    )
+
+                    await client.send_message(dest_entity, msg)
+
+                # UPDATE PROGRESS
+                job = load_job(jid)
                 job["progress"]["done"] += 1
                 save_job(job)
 
-        # all done
+                # ⏱ INTERVAL AFTER EACH MESSAGE
+                interval = int(job.get("interval", 0))
+                if interval > 0:
+                    await asyncio.sleep(interval)
+
+        job = load_job(jid)
         job["status"] = "completed"
         save_job(job)
         log(jid, "Job completed")
-        break
+
+    except Exception as e:
+        if str(e) == "CANCELLED":
+            log(jid, "Stopped by cancel")
+        else:
+            log(jid, f"Worker error: {e}")
 
     await client.disconnect()
 
 async def main():
-    for f in os.listdir(JOBS_DIR):
-        if not f.endswith(".json"):
-            continue
+    while True:
+        for f in os.listdir(JOBS_DIR):
+            if not f.endswith(".json"):
+                continue
 
-        try:
-            job = json.load(open(f"{JOBS_DIR}/{f}"))
-        except Exception:
-            continue
+            try:
+                job = json.load(open(f"{JOBS_DIR}/{f}"))
+            except:
+                continue
 
-        if job.get("status") == "running":
-            await run_job(job["job_id"])
+            if job.get("status") == "running":
+                await run_job(job["job_id"])
+
+        await asyncio.sleep(2)
 
 if __name__ == "__main__":
     asyncio.run(main())
