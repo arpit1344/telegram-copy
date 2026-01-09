@@ -141,7 +141,7 @@ async def text(update: Update, ctx):
         else:
             job["destinations"].append(update.message.text)
 
-app = ApplicationBuilder().token(CFG["8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"]).build()
+app = ApplicationBuilder().token("8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis").build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(buttons))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
