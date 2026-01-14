@@ -9,17 +9,14 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TelegramError
 
 # ============ CONFIG ============
-BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis" 
+BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"
 ADMIN_ID = 8214011603
 ALIAS_FILE = "channel_aliases.json"
 # ================================
 
-# -------- GLOBAL STATE --------
 JOB_WIZARD = {}
-# ------------------------------
 
 # -------- UTIL --------
 def run(cmd):
@@ -34,8 +31,7 @@ def save_aliases(data):
     json.dump(data, open(ALIAS_FILE, "w"), indent=2)
 
 def resolve_alias(inp):
-    aliases = load_aliases()
-    return aliases.get(inp, inp)
+    return load_aliases().get(inp, inp)
 
 def valid_channel(inp: str) -> bool:
     if inp.startswith("@") and len(inp) > 1:
@@ -43,14 +39,6 @@ def valid_channel(inp: str) -> bool:
     if inp.startswith("-100") and inp[4:].isdigit():
         return True
     return False
-
-async def check_channel_access(context, ch):
-    try:
-        chat = await context.bot.get_chat(ch)
-        me = await context.bot.get_chat_member(chat.id, context.bot.id)
-        return me.status in ("administrator", "member")
-    except TelegramError:
-        return False
 
 # -------- HELPERS --------
 def progress_bar(percent, size=20):
@@ -88,19 +76,16 @@ def main_panel():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Admin Panel Ready", reply_markup=main_panel())
 
-# -------- ALIAS COMMAND --------
 @admin_only
 async def alias_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) != 3 or args[0] != "add":
-        await update.message.reply_text("Usage:\n/alias add name @channel")
+        await update.message.reply_text("Usage:\n/alias add name @channel_or_id")
         return
-
     _, name, channel = args
     if not valid_channel(channel):
         await update.message.reply_text("❌ Invalid channel")
         return
-
     data = load_aliases()
     data[name] = channel
     save_aliases(data)
@@ -115,7 +100,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "create_job":
         JOB_WIZARD[q.from_user.id] = {"step": 1}
         await q.edit_message_text(
-            "🧙‍♂️ Job Wizard\n\nStep 1️⃣\nSend SOURCE channel or alias"
+            "🧙‍♂️ Job Wizard\n\nStep 1️⃣\nSend SOURCE (channel/group/ID/alias)"
         )
 
     elif q.data == "confirm_job":
@@ -144,10 +129,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         json.dump(job, open(f"jobs/{pr}/{job['id']}.json", "w"), indent=2)
         JOB_WIZARD.pop(q.from_user.id, None)
-
         await q.edit_message_text("✅ Job created!", reply_markup=main_panel())
 
-# -------- TEXT HANDLER (WIZARD) --------
+# -------- TEXT HANDLER (Wizard) --------
 @admin_only
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -157,40 +141,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wiz = JOB_WIZARD[uid]
     msg = resolve_alias(update.message.text.strip())
 
-    # STEP 1: SOURCE
     if wiz["step"] == 1:
         if not valid_channel(msg):
             await update.message.reply_text("❌ Invalid source")
             return
-        if not await check_channel_access(context, msg):
-            await update.message.reply_text("❌ Bot has no access to source")
-            return
         wiz["source"] = msg
         wiz["step"] = 2
-        await update.message.reply_text("Step 2️⃣\nSend TARGET channel or alias")
+        await update.message.reply_text("Step 2️⃣\nSend TARGET")
 
-    # STEP 2: TARGET
     elif wiz["step"] == 2:
         if not valid_channel(msg) or msg == wiz["source"]:
             await update.message.reply_text("❌ Invalid target")
             return
-        if not await check_channel_access(context, msg):
-            await update.message.reply_text("❌ Bot has no access to target")
-            return
         wiz["target"] = msg
         wiz["step"] = 3
-        await update.message.reply_text("Step 3️⃣\nSend PRIORITY (high/normal/low)")
+        await update.message.reply_text("Step 3️⃣\nPriority: high / normal / low")
 
-    # STEP 3: PRIORITY
     elif wiz["step"] == 3:
         if msg not in ("high", "normal", "low"):
             await update.message.reply_text("❌ Invalid priority")
             return
         wiz["priority"] = msg
         wiz["step"] = 4
-        await update.message.reply_text("Step 4️⃣\nSend BATCH SIZE")
+        await update.message.reply_text("Step 4️⃣\nBatch size (number)")
 
-    # STEP 4: BATCH SIZE + PREVIEW
     elif wiz["step"] == 4:
         if not msg.isdigit() or int(msg) <= 0:
             await update.message.reply_text("❌ Invalid batch size")
