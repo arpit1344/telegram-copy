@@ -1,4 +1,4 @@
-# admin_bot.py
+# ================== admin_bot.py ==================
 import os, json, time, uuid, subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -10,15 +10,15 @@ from telegram.ext import (
     filters,
 )
 
-# ============ CONFIG ============
+# ================= CONFIG =================
 BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"
-ADMIN_ID = 8214011603
+ADMIN_ID = 8214011603  # <-- apna Telegram user id
 ALIAS_FILE = "channel_aliases.json"
-# ================================
+# ==========================================
 
 JOB_WIZARD = {}
 
-# -------- UTIL --------
+# ================= UTIL ===================
 def run(cmd):
     return subprocess.getoutput(cmd)
 
@@ -30,17 +30,18 @@ def load_aliases():
 def save_aliases(data):
     json.dump(data, open(ALIAS_FILE, "w"), indent=2)
 
-def resolve_alias(inp):
-    return load_aliases().get(inp, inp)
+def resolve_alias(v):
+    return load_aliases().get(v, v)
 
-def valid_channel(inp: str) -> bool:
-    if inp.startswith("@") and len(inp) > 1:
+def valid_channel(v):
+    if v.startswith("@") and len(v) > 1:
         return True
-    if inp.startswith("-100") and inp[4:].isdigit():
+    if v.startswith("-100") and v[4:].isdigit():
         return True
     return False
+# ==========================================
 
-# -------- HELPERS --------
+# ================= HELPERS =================
 def progress_bar(percent, size=20):
     filled = int(size * percent / 100)
     return "█" * filled + "░" * (size - filled)
@@ -50,10 +51,8 @@ def fmt_eta(sec):
     h = sec // 3600
     m = (sec % 3600) // 60
     s = sec % 60
-    if h:
-        return f"{h}h {m}m"
-    if m:
-        return f"{m}m {s}s"
+    if h: return f"{h}h {m}m"
+    if m: return f"{m}m {s}s"
     return f"{s}s"
 
 def admin_only(func):
@@ -62,19 +61,28 @@ def admin_only(func):
             return
         return await func(update, context)
     return wrapper
+# ===========================================
 
-# -------- UI --------
+# ================= UI ======================
 def main_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Create Job", callback_data="create_job")],
-        [InlineKeyboardButton("📊 Dashboard", callback_data="stats")],
-        [InlineKeyboardButton("♻ Restart Workers", callback_data="restart_workers")],
+        [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard")],
+        [
+            InlineKeyboardButton("▶ Start Workers", callback_data="start_workers"),
+            InlineKeyboardButton("♻ Restart Workers", callback_data="restart_workers")
+        ],
+        [InlineKeyboardButton("🔁 Restart Admin", callback_data="restart_admin")]
     ])
+# ===========================================
 
-# -------- COMMANDS --------
+# ================= COMMANDS =================
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Admin Panel Ready", reply_markup=main_panel())
+    await update.message.reply_text(
+        "✅ Admin Panel Ready",
+        reply_markup=main_panel()
+    )
 
 @admin_only
 async def alias_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,48 +98,119 @@ async def alias_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data[name] = channel
     save_aliases(data)
     await update.message.reply_text(f"✅ Alias saved: {name} → {channel}")
+# ============================================
 
-# -------- BUTTON HANDLER --------
+# ================= BUTTON HANDLER ===========
 @admin_only
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    if q.data == "create_job":
+    # ---------- WORKERS ----------
+    if q.data == "start_workers":
+        run("sudo systemctl start telegram_worker@1 telegram_worker@2 || true")
+        await q.edit_message_text("▶ Workers started", reply_markup=main_panel())
+
+    elif q.data == "restart_workers":
+        run("sudo systemctl restart telegram_worker@1 telegram_worker@2 || true")
+        await q.edit_message_text("♻ Workers restarted", reply_markup=main_panel())
+
+    elif q.data == "restart_admin":
+        subprocess.Popen(["sudo", "systemctl", "restart", "telegram_admin"])
+
+    # ---------- CREATE JOB ----------
+    elif q.data == "create_job":
         JOB_WIZARD[q.from_user.id] = {"step": 1}
         await q.edit_message_text(
-            "🧙‍♂️ Job Wizard\n\nStep 1️⃣\nSend SOURCE (channel/group/ID/alias)"
+            "🧙 Job Wizard\n\nStep 1️⃣\nSend SOURCE channel / group / ID / alias"
         )
 
-    elif q.data == "confirm_job":
-        wiz = JOB_WIZARD.get(q.from_user.id)
-        if not wiz:
-            return
+    # ---------- DASHBOARD ----------
+    elif q.data == "dashboard":
+        text = "📊 Jobs\n\n"
+        kb = []
 
-        pr = wiz["priority"]
-        os.makedirs(f"jobs/{pr}", exist_ok=True)
+        for pr in ["high", "normal", "low"]:
+            folder = f"jobs/{pr}"
+            if not os.path.isdir(folder):
+                continue
+            for f in os.listdir(folder):
+                if not f.endswith(".json"):
+                    continue
+                job = json.load(open(os.path.join(folder, f)))
+                text += f"🆔 {job['id']} | {job.get('progress',0)}% | {job['status']}\n"
+                kb.append([
+                    InlineKeyboardButton(
+                        f"🔍 View {job['id']}",
+                        callback_data=f"view:{pr}:{f}"
+                    )
+                ])
 
-        job = {
-            "id": f"job_{uuid.uuid4().hex[:6]}",
-            "source": wiz["source"],
-            "target": wiz["target"],
-            "priority": pr,
-            "status": "running",
-            "batch_size": wiz["batch_size"],
-            "processed_items": 0,
-            "total_items": 0,
-            "progress": 0,
-            "last_message_id": 0,
-            "retry_count": 0,
-            "max_retries": 3,
-            "created_at": int(time.time()),
-        }
+        kb.append([InlineKeyboardButton("⬅ Back", callback_data="back")])
+        await q.edit_message_text(text or "No jobs", reply_markup=InlineKeyboardMarkup(kb))
 
-        json.dump(job, open(f"jobs/{pr}/{job['id']}.json", "w"), indent=2)
-        JOB_WIZARD.pop(q.from_user.id, None)
-        await q.edit_message_text("✅ Job created!", reply_markup=main_panel())
+    # ---------- BACK ----------
+    elif q.data == "back":
+        await q.edit_message_text("⬅ Back", reply_markup=main_panel())
 
-# -------- TEXT HANDLER (Wizard) --------
+    # ---------- VIEW JOB ----------
+    elif q.data.startswith("view:"):
+        _, pr, fn = q.data.split(":")
+        path = f"jobs/{pr}/{fn}"
+        job = json.load(open(path))
+
+        p = job.get("progress", 0)
+        text = (
+            f"🆔 {job['id']}\n"
+            f"{progress_bar(p)} {p}%\n\n"
+            f"📦 {job.get('processed_items',0)} / {job.get('total_items',0)}\n"
+            f"⚡ {job.get('speed',0)} msg/s\n"
+            f"⏱ ETA: {fmt_eta(job.get('eta_seconds',0))}\n"
+            f"📨 Batch: {job.get('batch_size')}\n"
+            f"⚙ Status: {job['status']}"
+        )
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("▶ Start", callback_data=f"start:{pr}:{fn}"),
+                InlineKeyboardButton("⏸ Pause", callback_data=f"pause:{pr}:{fn}")
+            ],
+            [
+                InlineKeyboardButton("▶ Resume", callback_data=f"resume:{pr}:{fn}"),
+                InlineKeyboardButton("🔄 Retry", callback_data=f"retry:{pr}:{fn}")
+            ],
+            [
+                InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{pr}:{fn}")
+            ],
+            [InlineKeyboardButton("⬅ Back", callback_data="dashboard")]
+        ])
+
+        await q.edit_message_text(text, reply_markup=kb)
+
+    # ---------- JOB ACTIONS ----------
+    elif q.data.startswith(("pause","resume","retry","start")):
+        act, pr, fn = q.data.split(":")
+        path = f"jobs/{pr}/{fn}"
+        job = json.load(open(path))
+
+        if act == "pause":
+            job["status"] = "paused"
+        elif act in ("resume","start"):
+            job["status"] = "running"
+        elif act == "retry":
+            job["status"] = "running"
+            job["retry_count"] = 0
+
+        json.dump(job, open(path,"w"), indent=2)
+        await q.answer(f"✅ {act.capitalize()} done")
+
+    elif q.data.startswith("delete:"):
+        _, pr, fn = q.data.split(":")
+        os.remove(f"jobs/{pr}/{fn}")
+        await q.answer("🗑 Job deleted")
+# ============================================
+
+# ================= TEXT HANDLER (WIZARD) =====
 @admin_only
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -147,7 +226,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         wiz["source"] = msg
         wiz["step"] = 2
-        await update.message.reply_text("Step 2️⃣\nSend TARGET")
+        await update.message.reply_text("Step 2️⃣ Send TARGET")
 
     elif wiz["step"] == 2:
         if not valid_channel(msg) or msg == wiz["source"]:
@@ -155,21 +234,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         wiz["target"] = msg
         wiz["step"] = 3
-        await update.message.reply_text("Step 3️⃣\nPriority: high / normal / low")
+        await update.message.reply_text("Step 3️⃣ Priority (high/normal/low)")
 
     elif wiz["step"] == 3:
-        if msg not in ("high", "normal", "low"):
+        if msg not in ("high","normal","low"):
             await update.message.reply_text("❌ Invalid priority")
             return
         wiz["priority"] = msg
         wiz["step"] = 4
-        await update.message.reply_text("Step 4️⃣\nBatch size (number)")
+        await update.message.reply_text("Step 4️⃣ Batch size")
 
     elif wiz["step"] == 4:
-        if not msg.isdigit() or int(msg) <= 0:
+        if not msg.isdigit():
             await update.message.reply_text("❌ Invalid batch size")
             return
-
         wiz["batch_size"] = int(msg)
         wiz["step"] = 5
 
@@ -178,7 +256,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Source: {wiz['source']}\n"
             f"Target: {wiz['target']}\n"
             f"Priority: {wiz['priority']}\n"
-            f"Batch size: {wiz['batch_size']}"
+            f"Batch: {wiz['batch_size']}"
         )
 
         kb = InlineKeyboardMarkup([
@@ -188,7 +266,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(text, reply_markup=kb)
 
-# -------- MAIN --------
+# ================= CONFIRM CREATE ===========
+@admin_only
+async def confirm_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pass
+# ============================================
+
+# ================= MAIN =====================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -200,3 +284,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# =================================================
