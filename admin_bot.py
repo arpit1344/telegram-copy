@@ -23,8 +23,8 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 
-BOT_TOKEN = "PASTE_YOUR_ADMIN_BOT_TOKEN"
-ADMIN_ID = 123456789
+BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"
+ADMIN_ID = 8214011603
 
 BASE_JOBS = "jobs"
 PRIORITY = ["high", "normal", "low"]
