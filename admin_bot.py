@@ -1,13 +1,10 @@
 # admin_bot.py
-# SIMPLE & STABLE ADMIN PANEL
-# - Auto-detect single / multi worker
-# - No @1 confusion
-# - Restart / Start / Stop works safely
+# SIMPLE ADMIN PANEL – auto worker detect
 
 import os
-import subprocess
-import time
 import json
+import time
+import subprocess
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,29 +15,19 @@ from telegram.ext import (
 )
 
 # ========= CONFIG =========
-
-BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"
-ADMIN_ID = 8214011603
-
+BOT_TOKEN = "PASTE_BOT_TOKEN_HERE"
+ADMIN_ID = 123456789
 # ==========================
 
-
-# ========= HELPERS =========
 
 def run(cmd):
     return subprocess.getoutput(cmd)
 
 def worker_units():
-    """
-    Auto-detect workers.
-    If telegram_worker@1 exists → multi-worker
-    Else → single worker
-    """
     out = run("systemctl list-unit-files | grep telegram_worker@")
     if "telegram_worker@" in out:
         return ["telegram_worker@1", "telegram_worker@2"]
-    else:
-        return ["telegram_worker"]
+    return ["telegram_worker"]
 
 def start_workers():
     for w in worker_units():
@@ -55,18 +42,6 @@ def restart_workers():
         run(f"sudo systemctl restart {w}")
 
 
-# ========= SECURITY =========
-
-def admin_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != ADMIN_ID:
-            return
-        return await func(update, context)
-    return wrapper
-
-
-# ========= UI =========
-
 def panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ Start Workers", callback_data="start")],
@@ -76,14 +51,17 @@ def panel():
     ])
 
 
-# ========= HANDLERS =========
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != ADMIN_ID:
+            return
+        return await func(update, context)
+    return wrapper
+
 
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Admin Panel Ready",
-        reply_markup=panel()
-    )
+    await update.message.reply_text("✅ Admin Panel Ready", reply_markup=panel())
 
 
 @admin_only
@@ -104,18 +82,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("♻️ Workers restarted")
 
     elif q.data == "restart_admin":
-        await q.answer("🔁 Restarting admin bot…")
         subprocess.Popen(["sudo", "systemctl", "restart", "telegram_admin"])
+        await q.answer("🔁 Restarting admin bot")
 
-
-# ========= MAIN =========
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
-
-    print("✅ Admin Bot Running...")
+    print("✅ Admin bot running")
     app.run_polling()
 
 
