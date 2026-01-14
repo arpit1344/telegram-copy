@@ -1,42 +1,39 @@
-import time, json, os
+# copier_worker.py
+# SAFE worker – never crashes on bad jobs
+
+import time
+import json
+import os
+
 from job_queue import fetch_job
-from job_lock import unlock
-from state import load_state
-from stats import load_stats, save_stats
+
+print("🚀 Worker started")
 
 while True:
-    STATE = load_state()
-
-    if STATE.get("paused"):
-        time.sleep(1)
-        continue
-
     job, path = fetch_job()
+
     if not job:
-        time.sleep(1)
+        time.sleep(2)
         continue
 
     try:
-        # 🔁 COPY ONE MESSAGE HERE
-        job["cursor"] += 1
-        job["retry"] = 0
+        print(f"📦 Picked job: {path}")
 
-        stats = load_stats()
-        stats["messages_copied"] += 1
-        save_stats(stats)
+        # ---- SIMULATED WORK ----
+        # yahan tum telegram copy logic daal sakte ho
+        time.sleep(1)
 
-    except Exception:
-        job["failures"] += 1
-        stats = load_stats()
-        stats["errors"] += 1
-        save_stats(stats)
+        job["status"] = "done"
 
-        if job["failures"] >= 10:
-            job["status"] = "failed"
+        with open(path, "w") as fp:
+            json.dump(job, fp, indent=2)
 
-    finally:
-        if os.path.exists(path):
-            if job["status"] != "failed":
-                unlock(job, path)
-            else:
-                json.dump(job, open(path, "w"), indent=2)
+        print(f"✅ Job done: {path}")
+
+    except Exception as e:
+        print("❌ Job error:", e)
+        job["status"] = "failed"
+        with open(path, "w") as fp:
+            json.dump(job, fp, indent=2)
+
+    time.sleep(1)
