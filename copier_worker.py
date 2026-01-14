@@ -3,6 +3,11 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from job_queue import fetch_job, update_job, unlock_job, mark_failed
 from config import API_ID, API_HASH, RETRY_BACKOFF
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=".env")  # 👈 force load
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+API_ID = int(API_ID) if API_ID else None
 
 WORKER_ID = os.getenv("WORKER_ID", "1")
 SESSION = f"user_session_{WORKER_ID}"
@@ -68,3 +73,8 @@ async def worker_loop():
 
 if __name__ == "__main__":
     asyncio.run(worker_loop())
+
+print("DEBUG ENV FILE:", os.path.exists(".env"))
+print("DEBUG API_ID:", API_ID)
+print("DEBUG API_HASH:", API_HASH)
+
