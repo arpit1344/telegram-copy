@@ -11,8 +11,8 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"
-ADMIN_ID = 8214011603  # <-- apna Telegram user id
+BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis" 
+ADMIN_ID = 8214011603         # <-- apna telegram user id
 ALIAS_FILE = "channel_aliases.json"
 # ==========================================
 
@@ -47,12 +47,16 @@ def progress_bar(percent, size=20):
     return "█" * filled + "░" * (size - filled)
 
 def fmt_eta(sec):
+    if not sec:
+        return "--"
     sec = int(sec)
     h = sec // 3600
     m = (sec % 3600) // 60
     s = sec % 60
-    if h: return f"{h}h {m}m"
-    if m: return f"{m}m {s}s"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
     return f"{s}s"
 
 def admin_only(func):
@@ -149,7 +153,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb.append([InlineKeyboardButton("⬅ Back", callback_data="back")])
         await q.edit_message_text(text or "No jobs", reply_markup=InlineKeyboardMarkup(kb))
 
-    # ---------- BACK ----------
     elif q.data == "back":
         await q.edit_message_text("⬅ Back", reply_markup=main_panel())
 
@@ -165,7 +168,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{progress_bar(p)} {p}%\n\n"
             f"📦 {job.get('processed_items',0)} / {job.get('total_items',0)}\n"
             f"⚡ {job.get('speed',0)} msg/s\n"
-            f"⏱ ETA: {fmt_eta(job.get('eta_seconds',0))}\n"
+            f"⏱ ETA: {fmt_eta(job.get('eta_seconds'))}\n"
             f"📨 Batch: {job.get('batch_size')}\n"
             f"⚙ Status: {job['status']}"
         )
@@ -208,9 +211,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, pr, fn = q.data.split(":")
         os.remove(f"jobs/{pr}/{fn}")
         await q.answer("🗑 Job deleted")
+
+    # ---------- CONFIRM JOB ----------
+    elif q.data == "confirm_job":
+        await confirm_job(update, context)
 # ============================================
 
-# ================= TEXT HANDLER (WIZARD) =====
+# ================= WIZARD TEXT HANDLER =======
 @admin_only
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -248,6 +255,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not msg.isdigit():
             await update.message.reply_text("❌ Invalid batch size")
             return
+
         wiz["batch_size"] = int(msg)
         wiz["step"] = 5
 
@@ -265,11 +273,73 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         await update.message.reply_text(text, reply_markup=kb)
+# ============================================
 
-# ================= CONFIRM CREATE ===========
+# ================= CONFIRM JOB ===============
 @admin_only
 async def confirm_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pass
+    q = update.callback_query
+    await q.answer()
+
+    uid = q.from_user.id
+    wiz = JOB_WIZARD.get(uid)
+    if not wiz:
+        await q.edit_message_text("❌ No job to confirm", reply_markup=main_panel())
+        return
+
+    pr = wiz["priority"]
+    os.makedirs(f"jobs/{pr}", exist_ok=True)
+
+    job_id = f"job_{uuid.uuid4().hex[:6]}"
+    fn = f"{job_id}.json"
+    path = f"jobs/{pr}/{fn}"
+
+    job = {
+        "id": job_id,
+        "source": wiz["source"],
+        "target": wiz["target"],
+        "priority": pr,
+        "status": "running",
+        "batch_size": wiz["batch_size"],
+        "processed_items": 0,
+        "total_items": 0,
+        "progress": 0,
+        "last_message_id": 0,
+        "retry_count": 0,
+        "max_retries": 3,
+        "created_at": int(time.time())
+    }
+
+    json.dump(job, open(path, "w"), indent=2)
+    JOB_WIZARD.pop(uid, None)
+
+    # AUTO OPEN DETAIL VIEW
+    text = (
+        f"🆔 {job_id}\n"
+        f"{progress_bar(0)} 0%\n\n"
+        f"📦 0 / 0\n"
+        f"⚡ 0 msg/s\n"
+        f"⏱ ETA: --\n"
+        f"📨 Batch: {job['batch_size']}\n"
+        f"⚙ Status: running"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("▶ Start", callback_data=f"start:{pr}:{fn}"),
+            InlineKeyboardButton("⏸ Pause", callback_data=f"pause:{pr}:{fn}")
+        ],
+        [
+            InlineKeyboardButton("▶ Resume", callback_data=f"resume:{pr}:{fn}"),
+            InlineKeyboardButton("🔄 Retry", callback_data=f"retry:{pr}:{fn}")
+        ],
+        [
+            InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{pr}:{fn}")
+        ],
+        [InlineKeyboardButton("⬅ Back", callback_data="dashboard")]
+    ])
+
+    await q.edit_message_text(text, reply_markup=kb)
 # ============================================
 
 # ================= MAIN =====================
