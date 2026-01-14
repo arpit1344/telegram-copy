@@ -1,8 +1,12 @@
-import os, json, asyncio
+import os
+import json
+import asyncio
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.tl.types import MessageService
 from dateutil.parser import parse
+
+from job_queue import fetch_job, update_job, unlock_job, mark_failed
 
 CFG = json.load(open("config.json"))
 API_ID = CFG["api_id"]
@@ -34,39 +38,36 @@ async def wait_if_paused(jid):
             return
         await asyncio.sleep(1)
 
-async def run_job(jid):
-    client = TelegramClient("worker_session", API_ID, API_HASH)
+async def run_job(job):
+    jid = job["job_id"]
+
+    # ✅ UNIQUE SESSION PER JOB (NO SQLITE LOCK)
+    client = TelegramClient(f"job_{jid}", API_ID, API_HASH)
     await client.start()
 
     log(jid, "Worker started")
 
     try:
-        job = load_job(jid)
-        job["status"] = "running"
-        save_job(job)
-
         for src in job["sources"]:
             src_entity = await client.get_entity(
                 int(src) if str(src).startswith("-100") else src
             )
 
-            async for msg in client.iter_messages(src_entity):
+            async for msg in client.iter_messages(src_entity, reverse=True):
                 job = load_job(jid)
 
-                # ❌ CANCEL IMMEDIATELY
                 if job.get("cancelled"):
                     log(jid, "Job cancelled")
                     job["status"] = "cancelled"
                     save_job(job)
                     return
 
-                # ⏸ STRICT PAUSE
                 await wait_if_paused(jid)
 
                 if isinstance(msg, MessageService):
                     continue
 
-                # DATE FILTER
+                # 📅 DATE FILTER
                 if job["date_mode"] != "all":
                     m = msg.date.date()
                     if job["date_mode"] == "single" and m != parse(job["from"]).date():
@@ -75,13 +76,8 @@ async def run_job(jid):
                         if not (parse(job["from"]).date() <= m <= parse(job["to"]).date()):
                             continue
 
-                # SEND TO DESTINATIONS
                 for dest in job["destinations"]:
                     await wait_if_paused(jid)
-
-                    job = load_job(jid)
-                    if job.get("cancelled"):
-                        raise Exception("CANCELLED")
 
                     dest_entity = await client.get_entity(
                         int(dest) if str(dest).startswith("-100") else dest
@@ -89,12 +85,12 @@ async def run_job(jid):
 
                     await client.send_message(dest_entity, msg)
 
-                # UPDATE PROGRESS
+                # 📈 PROGRESS UPDATE
                 job = load_job(jid)
                 job["progress"]["done"] += 1
+                job["progress"]["last_message_id"] = msg.id
                 save_job(job)
 
-                # ⏱ INTERVAL AFTER EACH MESSAGE
                 interval = int(job.get("interval", 0))
                 if interval > 0:
                     await asyncio.sleep(interval)
@@ -109,24 +105,33 @@ async def run_job(jid):
             log(jid, "Stopped by cancel")
         else:
             log(jid, f"Worker error: {e}")
+        raise
 
-    await client.disconnect()
+    finally:
+        await client.disconnect()
 
 async def main():
     while True:
-        for f in os.listdir(JOBS_DIR):
-            if not f.endswith(".json"):
-                continue
+        job, path = fetch_job()
 
-            try:
-                job = json.load(open(f"{JOBS_DIR}/{f}"))
-            except:
-                continue
+        if not job:
+            await asyncio.sleep(2)
+            continue
 
-            if job.get("status") == "running":
-                await run_job(job["job_id"])
+        try:
+            job["status"] = "running"
+            update_job(path, job)
 
-        await asyncio.sleep(2)
+            await run_job(job)
+
+            job["status"] = "completed"
+            update_job(path, job)
+
+        except Exception as e:
+            mark_failed(path, str(e))
+
+        finally:
+            unlock_job(path)
 
 if __name__ == "__main__":
     asyncio.run(main())
