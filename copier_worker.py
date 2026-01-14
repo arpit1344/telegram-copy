@@ -1,67 +1,42 @@
-import asyncio, json, os
-from datetime import datetime
-from dateutil.parser import parse
-from telethon import TelegramClient
-from telethon.tl.types import MessageService
-from telethon.errors import FloodWaitError
+import time, json, os
+from queue import fetch_job
+from job_lock import unlock
+from state import load_state
+from stats import load_stats, save_stats
 
-def log(jid, msg):
-    os.makedirs("logs", exist_ok=True)
-    with open(f"logs/{jid}.log", "a") as f:
-        f.write(f"[{datetime.now()}] {msg}\n")
+while True:
+    STATE = load_state()
 
-async def run_job(job_file, api_id, api_hash):
-    job = json.load(open(job_file))
-    jid = job["job_id"]
+    if STATE.get("paused"):
+        time.sleep(1)
+        continue
 
-    client = TelegramClient(f"session_{jid}", api_id, api_hash)
-    await client.start()
-    log(jid, "Job started")
+    job, path = fetch_job()
+    if not job:
+        time.sleep(1)
+        continue
 
-    for src in job["sources"]:
-        last_id = job["resume"].get(str(src), 0)
+    try:
+        # 🔁 COPY ONE MESSAGE HERE
+        job["cursor"] += 1
+        job["retry"] = 0
 
-        async for msg in client.iter_messages(src, min_id=last_id):
-            job = json.load(open(job_file))
+        stats = load_stats()
+        stats["messages_copied"] += 1
+        save_stats(stats)
 
-            if job["cancelled"]:
-                log(jid, "Cancelled")
-                return
+    except Exception:
+        job["failures"] += 1
+        stats = load_stats()
+        stats["errors"] += 1
+        save_stats(stats)
 
-            while job["paused"]:
-                await asyncio.sleep(2)
-                job = json.load(open(job_file))
+        if job["failures"] >= 10:
+            job["status"] = "failed"
 
-            if isinstance(msg, MessageService):
-                continue
-
-            if job["date_mode"] != "all":
-                mdate = msg.date.date()
-                if job["date_mode"] == "single":
-                    if mdate != parse(job["from"]).date():
-                        continue
-                if job["date_mode"] == "range":
-                    if not (parse(job["from"]).date() <= mdate <= parse(job["to"]).date()):
-                        continue
-
-            try:
-                for dst in job["destinations"]:
-                    if msg.media:
-                        await client.send_file(dst, msg.media, caption=msg.text or "")
-                    elif msg.text:
-                        await client.send_message(dst, msg.text)
-
-                job["resume"][str(src)] = msg.id
-                job["progress"]["done"] += 1
-
-                if job["progress"]["done"] % job["batch"] == 0:
-                    await asyncio.sleep(2)
-
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds)
-
-            json.dump(job, open(job_file, "w"), indent=2)
-
-    job["status"] = "completed"
-    log(jid, "Completed")
-    json.dump(job, open(job_file, "w"), indent=2)
+    finally:
+        if os.path.exists(path):
+            if job["status"] != "failed":
+                unlock(job, path)
+            else:
+                json.dump(job, open(path, "w"), indent=2)
