@@ -10,25 +10,23 @@ from telegram.ext import (
     filters,
 )
 
-# ================= CONFIG =================
-BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis" 
-ADMIN_ID = 8214011603         # <-- apna telegram user id
-ALIAS_FILE = "channel_aliases.json"
-# ==========================================
+from config import BOT_TOKEN, ADMIN_ID, ALIASES_FILE, JOBS_DIR
 
+# ================= GLOBAL =================
 JOB_WIZARD = {}
+# ==========================================
 
 # ================= UTIL ===================
 def run(cmd):
     return subprocess.getoutput(cmd)
 
 def load_aliases():
-    if not os.path.exists(ALIAS_FILE):
+    if not os.path.exists(ALIASES_FILE):
         return {}
-    return json.load(open(ALIAS_FILE))
+    return json.load(open(ALIASES_FILE))
 
 def save_aliases(data):
-    json.dump(data, open(ALIAS_FILE, "w"), indent=2)
+    json.dump(data, open(ALIASES_FILE, "w"), indent=2)
 
 def resolve_alias(v):
     return load_aliases().get(v, v)
@@ -135,7 +133,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = []
 
         for pr in ["high", "normal", "low"]:
-            folder = f"jobs/{pr}"
+            folder = os.path.join(JOBS_DIR, pr)
             if not os.path.isdir(folder):
                 continue
             for f in os.listdir(folder):
@@ -159,18 +157,19 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------- VIEW JOB ----------
     elif q.data.startswith("view:"):
         _, pr, fn = q.data.split(":")
-        path = f"jobs/{pr}/{fn}"
+        path = os.path.join(JOBS_DIR, pr, fn)
         job = json.load(open(path))
 
         p = job.get("progress", 0)
         text = (
             f"🆔 {job['id']}\n"
             f"{progress_bar(p)} {p}%\n\n"
-            f"📦 {job.get('processed_items',0)} / {job.get('total_items',0)}\n"
+            f"📦 {job.get('processed_items',0)} / {job.get('batch_size',0)}\n"
             f"⚡ {job.get('speed',0)} msg/s\n"
             f"⏱ ETA: {fmt_eta(job.get('eta_seconds'))}\n"
             f"📨 Batch: {job.get('batch_size')}\n"
-            f"⚙ Status: {job['status']}"
+            f"⚙ Status: {job['status']}\n"
+            f"❌ Reason: {job.get('failed_reason','-')}"
         )
 
         kb = InlineKeyboardMarkup([
@@ -183,6 +182,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔄 Retry", callback_data=f"retry:{pr}:{fn}")
             ],
             [
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"view:{pr}:{fn}")
+            ],
+            [
                 InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{pr}:{fn}")
             ],
             [InlineKeyboardButton("⬅ Back", callback_data="dashboard")]
@@ -193,7 +195,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------- JOB ACTIONS ----------
     elif q.data.startswith(("pause","resume","retry","start")):
         act, pr, fn = q.data.split(":")
-        path = f"jobs/{pr}/{fn}"
+        path = os.path.join(JOBS_DIR, pr, fn)
         job = json.load(open(path))
 
         if act == "pause":
@@ -209,10 +211,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data.startswith("delete:"):
         _, pr, fn = q.data.split(":")
-        os.remove(f"jobs/{pr}/{fn}")
+        os.remove(os.path.join(JOBS_DIR, pr, fn))
         await q.answer("🗑 Job deleted")
 
-    # ---------- CONFIRM JOB ----------
     elif q.data == "confirm_job":
         await confirm_job(update, context)
 # ============================================
@@ -257,7 +258,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         wiz["batch_size"] = int(msg)
-        wiz["step"] = 5
 
         text = (
             "🔍 Job Preview\n\n"
@@ -282,17 +282,17 @@ async def confirm_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     uid = q.from_user.id
-    wiz = JOB_WIZARD.get(uid)
+    wiz = JOB_WIZARD.pop(uid, None)
     if not wiz:
         await q.edit_message_text("❌ No job to confirm", reply_markup=main_panel())
         return
 
     pr = wiz["priority"]
-    os.makedirs(f"jobs/{pr}", exist_ok=True)
+    os.makedirs(os.path.join(JOBS_DIR, pr), exist_ok=True)
 
     job_id = f"job_{uuid.uuid4().hex[:6]}"
     fn = f"{job_id}.json"
-    path = f"jobs/{pr}/{fn}"
+    path = os.path.join(JOBS_DIR, pr, fn)
 
     job = {
         "id": job_id,
@@ -302,44 +302,19 @@ async def confirm_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "status": "running",
         "batch_size": wiz["batch_size"],
         "processed_items": 0,
-        "total_items": 0,
-        "progress": 0,
         "last_message_id": 0,
+        "progress": 0,
+        "speed": 0,
+        "eta_seconds": 0,
         "retry_count": 0,
-        "max_retries": 3,
+        "failed_reason": "",
         "created_at": int(time.time())
     }
 
     json.dump(job, open(path, "w"), indent=2)
-    JOB_WIZARD.pop(uid, None)
 
     # AUTO OPEN DETAIL VIEW
-    text = (
-        f"🆔 {job_id}\n"
-        f"{progress_bar(0)} 0%\n\n"
-        f"📦 0 / 0\n"
-        f"⚡ 0 msg/s\n"
-        f"⏱ ETA: --\n"
-        f"📨 Batch: {job['batch_size']}\n"
-        f"⚙ Status: running"
-    )
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("▶ Start", callback_data=f"start:{pr}:{fn}"),
-            InlineKeyboardButton("⏸ Pause", callback_data=f"pause:{pr}:{fn}")
-        ],
-        [
-            InlineKeyboardButton("▶ Resume", callback_data=f"resume:{pr}:{fn}"),
-            InlineKeyboardButton("🔄 Retry", callback_data=f"retry:{pr}:{fn}")
-        ],
-        [
-            InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{pr}:{fn}")
-        ],
-        [InlineKeyboardButton("⬅ Back", callback_data="dashboard")]
-    ])
-
-    await q.edit_message_text(text, reply_markup=kb)
+    await buttons(update, context)
 # ============================================
 
 # ================= MAIN =====================
