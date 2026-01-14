@@ -5,7 +5,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 # ===== CONFIG =====
 BOT_TOKEN = "8536928293:AAHUTdOtkWad8QxsZHoTxslXm9tcIFbbeis"
-ADMIN_ID = 123456789
+ADMIN_ID = 8214011603
 # ==================
 
 def run(cmd):
