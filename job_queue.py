@@ -1,16 +1,12 @@
-import os, json, time
+import os, json
+from config import JOBS_DIR, MAX_RETRIES
 
-BASE = "jobs"
 PRIORITY = ["high", "normal", "low"]
 LOCK_EXT = ".lock"
 
 def fetch_job():
-    """
-    Fetch one runnable job and lock it.
-    Returns (job_dict, job_path) or (None, None)
-    """
     for pr in PRIORITY:
-        folder = os.path.join(BASE, pr)
+        folder = os.path.join(JOBS_DIR, pr)
         if not os.path.isdir(folder):
             continue
 
@@ -20,8 +16,6 @@ def fetch_job():
 
             path = os.path.join(folder, fn)
             lock = path + LOCK_EXT
-
-            # already locked by another worker
             if os.path.exists(lock):
                 continue
 
@@ -30,15 +24,17 @@ def fetch_job():
             except Exception:
                 continue
 
-            if job.get("status") != "running":
+            if job.get("status") not in ("running", "retrying"):
                 continue
 
-            # 🔒 lock job
-            open(lock, "w").write(str(os.getpid()))
-
+            open(lock, "w").write("locked")
             return job, path
 
     return None, None
+
+
+def update_job(path, job):
+    json.dump(job, open(path, "w"), indent=2)
 
 
 def unlock_job(path):
@@ -47,13 +43,17 @@ def unlock_job(path):
         os.remove(lock)
 
 
-def mark_failed(path, reason="unknown"):
+def mark_failed(path, reason):
     job = json.load(open(path))
-    job["status"] = "failed"
+    retries = job.get("retry_count", 0)
+
     job["failed_reason"] = reason
-    json.dump(job, open(path, "w"), indent=2)
+
+    if retries < MAX_RETRIES:
+        job["retry_count"] = retries + 1
+        job["status"] = "retrying"
+    else:
+        job["status"] = "failed"
+
+    update_job(path, job)
     unlock_job(path)
-
-
-def update_job(path, job):
-    json.dump(job, open(path, "w"), indent=2)
