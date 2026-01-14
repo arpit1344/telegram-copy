@@ -1,3 +1,37 @@
+import asyncio
+import time
+import os
+from dotenv import load_dotenv
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+
+load_dotenv(".env")
+
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+SESSION = "worker_session"
+
+async def worker_loop():
+    print("🚀 WORKER LOOP STARTED", flush=True)
+
+    client = TelegramClient(SESSION, API_ID, API_HASH)
+    await client.start()
+    print("✅ TELETHON CONNECTED", flush=True)
+
+    while True:
+        print("⏳ WORKER TICK", flush=True)
+
+        # TEMP TEST — source se 1 msg uthao
+        try:
+            dialogs = await client.get_dialogs(limit=5)
+            print(f"📂 Dialogs found: {len(dialogs)}", flush=True)
+        except Exception as e:
+            print("❌ ERROR:", e, flush=True)
+
+        await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(worker_loop())
 import os, time, asyncio
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
