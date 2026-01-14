@@ -1,95 +1,76 @@
-# copier_worker.py
-import time, json
+import os, time, asyncio, sys
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from job_queue import fetch_job
+from job_queue import fetch_job, update_job, unlock_job, mark_failed
 
-# ===== TELEGRAM CONFIG =====
-API_ID = 123456        # <-- YOUR API ID
-API_HASH = "API_HASH"  # <-- YOUR API HASH
-SESSION = "worker_session"
+# ===== TELETHON CONFIG =====
+API_ID = 123456        # <-- apna api_id
+API_HASH = "API_HASH"  # <-- apna api_hash
+
+WORKER_ID = os.environ.get("WORKER_ID", "1")
+SESSION = f"user_session_{WORKER_ID}"
+
 # ==========================
 
-client = TelegramClient(SESSION, API_ID, API_HASH)
-client.start()
+async def process_job(client, job, path):
+    source = job["source"]
+    target = job["target"]
+    batch = job["batch_size"]
 
-print("🚀 Worker started")
-
-while True:
-    job, path = fetch_job()
-
-    if not job:
-        time.sleep(2)
-        continue
+    start_time = time.time()
+    processed = job.get("processed_items", 0)
+    last_id = job.get("last_message_id", 0)
 
     try:
-        source = job["source"]
-        target = job["target"]
-        batch  = job.get("batch_size", 10)
+        async for msg in client.iter_messages(source, min_id=last_id, limit=batch):
+            if msg.text:
+                await client.send_message(target, msg.text)
 
-        processed = job.get("processed_items", 0)
-        total     = job.get("total_items", 0)
-        last_id   = job.get("last_message_id", 0)
+            elif msg.media:
+                await client.send_file(target, msg.media, caption=msg.text)
 
-        # init start time once
-        if "start_time" not in job:
-            job["start_time"] = int(time.time())
-
-        # init total messages once
-        if total == 0:
-            total = client.get_messages(source, limit=0).total
-            job["total_items"] = total
-
-        # iterate messages
-        msgs = client.iter_messages(
-            source,
-            min_id=last_id,
-            limit=batch
-        )
-
-        for msg in msgs:
-            # pause support
-            if job.get("status") == "paused":
-                break
-
-            try:
-                client.send_message(target, msg)
-            except FloodWaitError as e:
-                time.sleep(e.seconds)
-                continue
-
-            last_id = msg.id
             processed += 1
+            job["processed_items"] = processed
+            job["last_message_id"] = msg.id
 
-            # speed + ETA
-            now = time.time()
-            elapsed = max(1, now - job["start_time"])
-            speed = round(processed / elapsed, 2)
-            remaining = max(0, total - processed)
-            eta = int(remaining / speed) if speed > 0 else 0
+            elapsed = time.time() - start_time
+            speed = processed / elapsed if elapsed > 0 else 0
 
-            job.update({
-                "processed_items": processed,
-                "last_message_id": last_id,
-                "progress": int((processed / total) * 100),
-                "speed": speed,
-                "eta_seconds": eta,
-                "last_update": int(now),
-                "status": "running"
-            })
+            job["speed"] = round(speed, 2)
+            job["progress"] = job.get("progress", 0)  # admin panel updates later
+            job["eta_seconds"] = int((job.get("total_items", processed) - processed) / speed) if speed else 0
 
-            json.dump(job, open(path, "w"), indent=2)
-            time.sleep(0.5)
+            update_job(path, job)
 
-        # job finished
-        if processed >= total:
-            job["status"] = "done"
-            json.dump(job, open(path, "w"), indent=2)
+        # ✅ completed batch
+        unlock_job(path)
+
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds)
+        unlock_job(path)
 
     except Exception as e:
-        job["retry_count"] = job.get("retry_count", 0) + 1
-        if job["retry_count"] > job.get("max_retries", 3):
-            job["status"] = "failed"
-        json.dump(job, open(path, "w"), indent=2)
+        mark_failed(path, str(e))
 
-    time.sleep(1)
+
+async def worker_loop():
+    client = TelegramClient(SESSION, API_ID, API_HASH)
+    await client.start()
+
+    print(f"🚀 Worker {WORKER_ID} started")
+
+    while True:
+        job, path = fetch_job()
+        if not job:
+            await asyncio.sleep(2)
+            continue
+
+        if job.get("status") != "running":
+            unlock_job(path)
+            continue
+
+        await process_job(client, job, path)
+
+
+if __name__ == "__main__":
+    asyncio.run(worker_loop())
