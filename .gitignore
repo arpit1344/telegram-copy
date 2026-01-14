@@ -1,6 +1,11 @@
-venv/
-config.json
+# Ignore runtime job files
+jobs/high/*.json
+jobs/normal/*.json
+jobs/low/*.json
+
+# Ignore bot runtime files
+state.json
+stats.json
+worker_session.session-journal
 *.session
-__pycache__/
-logs/*.log
 
