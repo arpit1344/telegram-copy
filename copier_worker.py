@@ -1,5 +1,5 @@
 import time, json, os
-from queue import fetch_job
+from job_queue import fetch_job
 from job_lock import unlock
 from state import load_state
 from stats import load_stats, save_stats
